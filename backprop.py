@@ -1,45 +1,31 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# # Deep Learning Homework n. 1
+# 
+
+# ## Imports
+# 
+
+# In[1]:
+
+
 from typing import Protocol
 import torch
 from dataclasses import dataclass
 
 Tensor = torch.Tensor  # avoid typing `torch.Tensor` at every function decleration
 
-CAN_TEXIFY = True
-try:
-    from IPython.display import display, Math, Latex
 
-    try:
-        get_ipython().__class__.__name__
-    except NameError:
-        CAN_TEXIFY = False
-except ImportError:
-    CAN_TEXIFY = False
+# ## Designing The network's inputs
+# 
 
+# ### The Activation function
+# 
+# All activation function follow the same `Activation` protocl - allowing the Network to not care about which activation it uses per layer.
+# 
 
-def fmt(x) -> str:
-    return f"{x:.4f}".rstrip("0").rstrip(".")
-
-
-def texify(t: Tensor) -> str:
-    if not CAN_TEXIFY:
-        return t.__repr__()
-    if t.dim() == 0:
-        return fmt(t.item())
-    if t.dim() == 1:
-        rows = [fmt(x) for x in t]  # column vector
-    else:
-        rows = [" & ".join(fmt(x) for x in row) for row in t]
-
-    body = (r" \\" + "\n").join(rows)
-    return r"\begin{bmatrix}" + "\n" + body + "\n" + r"\end{bmatrix}"
-
-
-def partial(symb: str, l: int) -> str:
-    return rf"\frac{{\partial \mathcal{{L}}}}{{\partial {symb}^{{({l})}}}}"
-
-
-def latex(t: str):
-    display(Latex(t))
+# In[2]:
 
 
 class Activation(Protocol):  # Later the `MLP` class could use a `list(Activation)` type
@@ -74,6 +60,14 @@ class Sigmoid(Activation):
         return s * (1 - s)
 
 
+# ### The Loss Function
+# 
+# Similar to `Activation`, we define a `Loss` protocol.
+# 
+
+# In[3]:
+
+
 class Loss(Protocol):
     def verify_dim_match(self, y_hat: Tensor, y: Tensor) -> None:
         if y_hat.shape != y.shape:
@@ -106,7 +100,7 @@ class LogLoss(Loss):  # assumes y is a binary and y_hat in range(0,1)
     def df(self, y_hat: Tensor, y: Tensor) -> Tensor:
         self.verify_dim_match(y_hat, y)
         p = self._clamp(y_hat)  # avoid ∞
-        return -1 * (y / y_hat) + (1 - y) / (1 - y_hat)
+        return -1 * (y / p) + (1 - y) / (1 - p)
 
 
 class AbsoluteError(Loss):
@@ -117,6 +111,16 @@ class AbsoluteError(Loss):
     def df(self, y_hat: Tensor, y: Tensor) -> Tensor:
         self.verify_dim_match(y_hat, y)
         return (y_hat - y).sign()
+
+
+# ### Helper objects for Network cache and information
+# 
+# The network will use few objects to help it recive, store, and return information. We choose to store this information in `dataclass` objects, but a simple `dict` could also work. The `dataclass` makes it easier to debug, and stay type-safe.
+# 
+# <!-- It needs to know how many hidden layers it gets, and which actiation each has. It needs to store the $z = W^{(l)} h^{(l-1)} + b^{l}$ and $h^({l}) = \sigma(z^{l})$ from the forward cache, and  -->
+# 
+
+# In[4]:
 
 
 @dataclass
@@ -145,6 +149,24 @@ class RunResult:
     err: Tensor
     loss: Tensor
     grads: list[GradCache]
+
+
+# ## Designing The Algorithm
+# 
+# We will design a `Network` object, which store ordered `Layer` objects in its `self.layers` field.
+# 
+
+# ### Layer
+# 
+
+# The `Layer` object will recive an input size, information about its size and activation function, and a seeded number generator. Uppon initilization, it will generate a $W \in \mathbb{R}^{out \times in}$ weight matrix using the provided generaotr, and create $b \in \mathbb{R}^{out} = \vec{0}$ bias. It will declare a `cache` and `grad` fields, but keep them as `None` untill forward pass.
+# 
+# #### Forward pass
+# 
+# The forward method will require the output from the previous layer, denoted as $h\_prev$. If $h\_prev$ is a vector, it is treated as a column and set $z^{(l)} = W^{(l)} \cdot h\_prev$. If $H\_prev$ is a matrix, we assume a Batch where the inputs are rows, and thus use $Z=H\_prev \cdot W^\top$. The method will store $z$ and $h\_prev$ in a `ForwardCache` object, and return $\sigma(z)$ for the next layer to use.
+# 
+
+# In[5]:
 
 
 STEP_SIZE = 0.03
@@ -202,6 +224,12 @@ class Layer:
         self.grad = None
 
 
+# ### The Network
+# 
+
+# In[6]:
+
+
 class Network:
     def __init__(self, in_size: int, loss: Loss, layers_specs: list[LayerSpec]):
         self.in_size = in_size
@@ -218,15 +246,15 @@ class Network:
             in_size = spec.size
         return layers
 
-    def run(self, x: Tensor, y: Tensor, epocs: int = 1) -> RunResult:
-        if epocs < 1:
-            raise ValueError("epocs must be at least 1")
+    def run(self, x: Tensor, y: Tensor, epocs: int = 0) -> RunResult:
+        if epocs < 0:
+            raise ValueError("epocs must be at least 0")
         dtype = torch.get_default_dtype()
         x = torch.as_tensor(x, dtype=dtype)
         y = torch.as_tensor(y, dtype=dtype)
 
         y_hat = x
-        for i in range(epocs):  # not required to learn; default is 1
+        for i in range(epocs + 1):  # not required to learn; default is 1
             y_hat = x
             for l in self.layers:
                 y_hat = l.forward(y_hat)
@@ -244,11 +272,58 @@ class Network:
         )
 
 
+# ## Displaying The Network
+# 
+
+# ### Helper functions for displaying using LaTex if available
+# 
+
+# In[7]:
+
+
+CAN_TEXIFY = False
+try:
+    from IPython import get_ipython
+    from IPython.display import display, Latex
+
+    CAN_TEXIFY = get_ipython() is not None
+except ImportError:
+    pass
+
+
+def fmt(x) -> str:
+    return f"{x:.4f}".rstrip("0").rstrip(".")
+
+
+def texify(t: Tensor) -> str:
+    if not CAN_TEXIFY:
+        return t.__repr__()
+    if t.dim() == 0:
+        return fmt(t.item())
+    if t.dim() == 1:
+        rows = [fmt(x) for x in t]  # column vector
+    else:
+        rows = [" & ".join(fmt(x) for x in row) for row in t]
+
+    body = (r" \\" + "\n").join(rows)
+    return r"\begin{bmatrix}" + "\n" + body + "\n" + r"\end{bmatrix}"
+
+
+def partial(symb: str, l: int) -> str:
+    return rf"\frac{{\partial \mathcal{{L}}}}{{\partial {symb}^{{({l})}}}}"
+
+
 def show(tex: str, plain: str) -> None:
     if CAN_TEXIFY:
         display(Latex(tex))
     else:
         print(plain)
+
+
+# ### Display Network's weights
+# 
+
+# In[8]:
 
 
 def show_network(net: Network) -> None:
@@ -269,6 +344,12 @@ def show_network(net: Network) -> None:
     )
 
 
+# ### Display a run report
+# 
+
+# In[9]:
+
+
 def report(r: RunResult) -> None:
     show(rf"$x = {texify(r.x)},\; y = {texify(r.y)}$", f"x = {r.x}\ny = {r.y}")
     show(
@@ -284,6 +365,12 @@ def report(r: RunResult) -> None:
         )
 
 
+# ## Running
+# 
+
+# In[10]:
+
+
 relu = ReLU()
 loss = RSS()
 layers_spec = [LayerSpec(size, relu) for size in [3, 3]] + [LayerSpec(2, Identity())]
@@ -295,7 +382,3 @@ x = torch.tensor([1.0, 1.0])
 y = torch.tensor([-1.0, 0.5])
 report(net.run(x, y))
 
-
-# x = torch.tensor([[1.0, 1.0], [0.5, 2]])
-# y = torch.tensor([[-1.0, 0.5], [1, -1]])
-# net.run(x, y, epocs=1)
